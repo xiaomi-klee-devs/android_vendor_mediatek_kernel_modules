@@ -21,6 +21,12 @@
  */
 #include "precomp.h"
 
+/* Debounce window (in OS ticks) for duplicate/retransmitted Auth1 (SAE
+ * Commit) frames while an external auth (hostapd SAE) request is still
+ * pending. Same value/semantics as MIN_AUTH_TIME_DIFF in aaa_fsm.c.
+ */
+#define MIN_AUTH_TIME_DIFF          100
+
 /*******************************************************************************
  *                              C O N S T A N T S
  *******************************************************************************
@@ -501,6 +507,32 @@ void saaFsmRunEventStart(struct ADAPTER *prAdapter,
 	}
 	/* 4 <2> The previous JOIN process is not completed ? */
 	if (prStaRec->eAuthAssocState != AA_STATE_IDLE) {
+		/* Guard against duplicate/retransmitted Auth1 (SAE Commit)
+		 * tearing down an in-flight external auth (hostapd SAE)
+		 * request. Without this, a retransmit that arrives while
+		 * the first request is still pending forces a reset to
+		 * AA_STATE_IDLE and restarts SAE from scratch; when the
+		 * original hostapd result later comes back via
+		 * saaFsmRunEventExternalAuthDone(), the state no longer
+		 * matches SAA_STATE_EXTERNAL_AUTH and the result is
+		 * silently dropped, causing repeated SAE restarts until
+		 * the peer gives up. Mirrors the MIN_AUTH_TIME_DIFF dup
+		 * Auth1 debounce already used in aaa_fsm.c.
+		 */
+		if (prStaRec->eAuthAssocState == SAA_STATE_EXTERNAL_AUTH) {
+			uint32_t rCurrentTime;
+			uint32_t rTimeDiff;
+
+			GET_CURRENT_SYSTIME(&rCurrentTime);
+			rTimeDiff = rCurrentTime - prStaRec->rLastJoinTime;
+
+			if (rTimeDiff < MIN_AUTH_TIME_DIFF) {
+				DBGLOG(SAA, WARN,
+				       "EVENT-START: dup SAE Commit (Auth1) within %u ticks while EXTERNAL_AUTH pending, ignore.\n",
+				       rTimeDiff);
+				return;
+			}
+		}
 		DBGLOG(SAA, ERROR, "EVENT-START: Reentry of SAA Module.\n");
 		prStaRec->eAuthAssocState = AA_STATE_IDLE;
 	}
